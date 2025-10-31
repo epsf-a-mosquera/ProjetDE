@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+venv/
+
+# Docker
+*.log
+*.env
+docker-compose.override.yml
+
+# IDEs
+.vscode/
+.idea/
+
+# Modelos entrenados
+models/

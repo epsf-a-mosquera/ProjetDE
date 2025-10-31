@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+requests
+beautifulsoup4
+psycopg2-binary
+pydantic
+aio_pika
+python-dotenv
+scikit-learn
+pandas
+numpy
+joblib
