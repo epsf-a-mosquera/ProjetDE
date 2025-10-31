@@ -1,72 +1,139 @@
-version: '3.8'
+version: "3.9"
+
 services:
+
+  ###########################################################
+  # PostgreSQL : base de données pour stocker les données #
+  ###########################################################
   postgres:
     image: postgres:15
+    container_name: projetde_postgres
     environment:
       POSTGRES_DB: scraping
       POSTGRES_USER: scrape
-      POSTGRES_PASSWORD: scrape_pass
+      POSTGRES_PASSWORD: scrape
+    ports:
+      - "5432:5432"
     volumes:
-      - pgdata:/var/lib/postgresql/data
-    ports: ["5432:5432"]
+      - postgres_data:/var/lib/postgresql/data
 
+  ###########################################################
+  # RabbitMQ : broker pour communication asynchrone       #
+  ###########################################################
   rabbitmq:
     image: rabbitmq:3-management
+    container_name: projetde_rabbitmq
     environment:
       RABBITMQ_DEFAULT_USER: user
       RABBITMQ_DEFAULT_PASS: pass
-    ports: ["5672:5672", "15672:15672"]
+    ports:
+      - "5672:5672"       # Port pour les microservices
+      - "15672:15672"     # Management UI
 
-  redis:
-    image: redis:7
-    ports: ["6379:6379"]
-
-  scheduler:
-    build: ./scheduler
-    depends_on: ["rabbitmq"]
-    environment:
-      RABBIT_URL: amqp://user:pass@rabbitmq:5672/
-
+  ###########################################################
+  # Scraper HTML : récupère la page principale et liens XML#
+  ###########################################################
   scraper:
     build: ./scraper
-    depends_on: ["rabbitmq", "redis"]
+    container_name: projetde_scraper
+    depends_on:
+      - rabbitmq
     environment:
-      RABBIT_URL: amqp://user:pass@rabbitmq:5672/
-      REDIS_URL: redis://redis:6379
+      RABBITMQ_HOST: rabbitmq
 
+  ###########################################################
+  # Parser XML : télécharge les fichiers XML et parse      #
+  ###########################################################
   parser:
     build: ./parser
-    depends_on: ["rabbitmq","postgres"]
+    container_name: projetde_parser
+    depends_on:
+      - rabbitmq
     environment:
-      RABBIT_URL: amqp://user:pass@rabbitmq:5672/
-      DATABASE_URL: postgres://scrape:scrape_pass@postgres:5432/scraping
+      RABBITMQ_HOST: rabbitmq
+    volumes:
+      - ./data/xml:/app/data/xml   # stockage persistant des XML
 
+  ###########################################################
+  # Ingest : insère les données structurées dans PostgreSQL#
+  ###########################################################
   ingest:
     build: ./ingest
-    depends_on: ["postgres","rabbitmq"]
+    container_name: projetde_ingest
+    depends_on:
+      - rabbitmq
+      - postgres
     environment:
-      DATABASE_URL: postgres://scrape:scrape_pass@postgres:5432/scraping
-      RABBIT_URL: amqp://user:pass@rabbitmq:5672/
+      DB_HOST: postgres
+      DB_NAME: scraping
+      DB_USER: scrape
+      DB_PASS: scrape
+      RABBITMQ_HOST: rabbitmq
+    volumes:
+      - ./data/xml:/app/data/xml   # si besoin de référence aux XML
 
-  api:
-    build: ./api
-    depends_on: ["postgres"]
+  ###########################################################
+  # Scheduler : planifie scraping et entraînement ML       #
+  ###########################################################
+  scheduler:
+    build: ./scheduler
+    container_name: projetde_scheduler
+    depends_on:
+      - scraper
+      - ml_trainer
+      - rabbitmq
     environment:
-      DATABASE_URL: postgres://scrape:scrape_pass@postgres:5432/scraping
-    ports: ["8000:8000"]
+      RABBITMQ_HOST: rabbitmq
 
+  ###########################################################
+  # ML Trainer : entraîne le modèle avec les données DB   #
+  ###########################################################
   ml_trainer:
     build: ./ml_trainer
-    depends_on: ["postgres"]
+    container_name: projetde_ml_trainer
+    depends_on:
+      - postgres
     environment:
-      DATABASE_URL: postgres://scrape:scrape_pass@postgres:5432/scraping
+      DB_HOST: postgres
+      DB_NAME: scraping
+      DB_USER: scrape
+      DB_PASS: scrape
+    volumes:
+      - ./models:/app/models      # sauvegarde des modèles ML
 
+  ###########################################################
+  # ML API : expose une API pour faire des prédictions     #
+  ###########################################################
   ml_api:
     build: ./ml_api
-    depends_on: ["ml_trainer"]
-    ports: ["8500:8500"]
-    volumes:
-      - ./models:/app/models
+    container_name: projetde_ml_api
+    depends_on:
+      - ml_trainer
+    environment:
+      MODEL_PATH: /app/models/model.pkl
+    ports:
+      - "8500:8500"
 
+  ###########################################################
+  # API REST : expose les données PostgreSQL via endpoints#
+  ###########################################################
+  api:
+    build: ./api
+    container_name: projetde_api
+    depends_on:
+      - postgres
+    environment:
+      DB_HOST: postgres
+      DB_NAME: scraping
+      DB_USER: scrape
+      DB_PASS: scrape
+    ports:
+      - "8000:8000"
+
+###########################################################
+# Volumes persistants
+###########################################################
 volumes:
-  pgdata:
+  postgres_data:
+  xml_data:
+  models_data:
