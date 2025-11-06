@@ -1,29 +1,43 @@
 ###########################################################
 # Docker Compose - ProjetDE (complet & portable)
-# Description générale :
-# Ce projet comprend plusieurs microservices pour le scraping,
-# parsing, ingestion dans une DB, entraînement ML et API.
-# Tous les services principaux sont inclus ici avec des
-# volumes locaux pour persistance.
+# Description :
+# Microservices pour scraping, parsing, ingestion DB,
+# entraînement ML et API. Tous les services sont inclus
+# avec des volumes locaux pour persistance.
 ###########################################################
+
+version: '3.9'
 
 services:
 
   ###########################################################
   # PostgreSQL : base de données locale
-  # Persistance via volume bind pour portabilité (./postgres_data)
+  # Persistance via bind mount (./postgres_data)
   ###########################################################
   postgres:
-    image: postgres:15  # Image officielle PostgreSQL version 15
-    container_name: projetde_postgres  # Nom du conteneur pour facilité la gestion
-    environment:  # Variables d'environnement pour config DB
-      POSTGRES_DB: DB_type_vehicule  # Nom de la base créée par défaut
-      POSTGRES_USER: guest  # Utilisateur principal
-      POSTGRES_PASSWORD: guest  # Mot de passe associé
+    image: postgres:15
+    container_name: projetde_postgres
+    environment:
+      POSTGRES_DB: DB_ERATV
+      POSTGRES_USER: guest
+      POSTGRES_PASSWORD: guest
     ports:
-      - "5432:5432"  # Expose le port local 5432 vers le conteneur
+      - "5432:5432"
     volumes:
-      - ./postgres_data:/var/lib/postgresql/data  # Stockage persistant local, permet portabilité
+      - ./postgres_data:/var/lib/postgresql/data   # persistance locale
+      - ./db/init:/docker-entrypoint-initdb.d      # scripts SQL init DB
+
+  ###########################################################
+  # pgAdmin : interface web pour PostgreSQL
+  ###########################################################
+  pgadmin:
+    image: dpage/pgadmin4
+    container_name: projetde_pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@admin.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "5050:80"  # accès web via http://localhost:5050
 
   ###########################################################
   # RabbitMQ : broker de messages avec interface de management
@@ -35,8 +49,8 @@ services:
       RABBITMQ_DEFAULT_USER: guest
       RABBITMQ_DEFAULT_PASS: guest
     ports:
-      - "5672:5672"
-      - "15672:15672"
+      - "5672:5672"    # communication microservices
+      - "15672:15672"  # interface web RabbitMQ
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "ping"]
       interval: 5s
@@ -44,23 +58,23 @@ services:
       retries: 5
 
   ###########################################################
-  # Scraper liste HTML : récupère la liste en CSV
-  # Stocke un csv dans ./data/csv_listes
+  # Scraper liste HTML : récupère la liste complète en CSV
+  # et envoie un message dans csv_list.queue
   ###########################################################
   scraper_liste_html:
-    build: ./scraper_liste_html  # Dockerfile local pour le service
+    build: ./scraper_liste_html
     container_name: projetde_scraper_liste_html
     depends_on:
-      - rabbitmq  # juste dépendance normale
+      - rabbitmq
     environment:
-      RABBITMQ_HOST: rabbitmq  # Nom du service RabbitMQ (réseau interne)
-      QUEUE_NAME: csv_list.queue  # Queue utilisée pour publier la liste csv
+      RABBITMQ_HOST: rabbitmq
+      QUEUE_NAME: csv_list.queue
     volumes:
-      - ./data/csv_listes:/app/data  # Stockage local des CSV de listes
+      - ./data/csv_listes:/app/data
 
   ###########################################################
-  # Parser liste CSV : analyse les CSV téléchargés
-  # Compare avec DB et envoie jobs pour types de véhicules
+  # Parser liste CSV : lit CSV, compare avec DB, envoie
+  # URL des véhicules nouveaux/modifiés dans vehicle_pages.queue
   ###########################################################
   parser_liste_csv:
     build: ./parser_liste_csv
@@ -70,18 +84,18 @@ services:
       - postgres
     environment:
       RABBITMQ_HOST: rabbitmq
-      QUEUE_IN: csv_list.queue      # Consomme la liste CSV
-      QUEUE_OUT: vehicle_pages.queue  # Publie les url pour les pages de type véhicule à scraper
+      QUEUE_IN: csv_list.queue
+      QUEUE_OUT: vehicle_pages.queue
       DB_HOST: postgres
-      DB_NAME: scraping
-      DB_USER: scrape
-      DB_PASS: scrape
+      DB_NAME: DB_ERATV
+      DB_USER: guest
+      DB_PASS: guest
     volumes:
-      - ./data/xml_listes:/app/data/xml/listes  # Accès aux fichiers XML
+      - ./data/csv_listes:/app/data/csv/listes
 
   ###########################################################
   # Scraper HTML type véhicule : récupère page véhicule,
-  # extrait le lien du XML détaillé et publie la tâche
+  # extrait lien XML et publie dans xml_vehicle.queue
   ###########################################################
   scraper_type_vehicule_html:
     build: ./scraper_type_vehicule_html
@@ -90,14 +104,13 @@ services:
       - rabbitmq
     environment:
       RABBITMQ_HOST: rabbitmq
-      QUEUE_IN: vehicle_pages.queue  # Consomme les jobs de parser_liste_xml
-      QUEUE_OUT: xml_vehicle.queue   # Publie jobs pour parser_type_vehicule_xml
+      QUEUE_IN: vehicle_pages.queue
+      QUEUE_OUT: xml_vehicle.queue
     volumes:
-      - ./data/xml_types_vehicules:/app/data/xml/types_vehicules  # Stockage local des XML
+      - ./data/xml_types_vehicules:/app/data/xml/types_vehicules
 
   ###########################################################
-  # Parser XML type véhicule : parse XML détaillé,
-  # sauvegarde et publie les données structurées
+  # Parser XML type véhicule : parse XML et publie données structurées
   ###########################################################
   parser_type_vehicule_xml:
     build: ./parser_type_vehicule_xml
@@ -122,13 +135,13 @@ services:
       - postgres
     environment:
       RABBITMQ_HOST: rabbitmq
-      QUEUE_IN: parsed.queue  # Consomme les données structurées
+      QUEUE_IN: parsed.queue
       DB_HOST: postgres
-      DB_NAME: scraping
-      DB_USER: scrape
-      DB_PASS: scrape
+      DB_NAME: DB_ERATV
+      DB_USER: guest
+      DB_PASS: guest
     volumes:
-      - ./data/xml_listes:/app/data/xml/listes     # Optionnel, référence
+      - ./data/xml_listes:/app/data/xml/listes
       - ./data/xml_types_vehicules:/app/data/xml/types_vehicules
 
   ###########################################################
@@ -144,11 +157,9 @@ services:
       - rabbitmq
     environment:
       RABBITMQ_HOST: rabbitmq
-      # Queues et intervals à config via variables si besoin
 
   ###########################################################
   # ML Trainer : entraîne le modèle sur la DB
-  # Sauvegarde dans /app/models
   ###########################################################
   ml_trainer:
     build: ./ml_trainer
@@ -157,11 +168,11 @@ services:
       - postgres
     environment:
       DB_HOST: postgres
-      DB_NAME: scraping
-      DB_USER: scrape
-      DB_PASS: scrape
+      DB_NAME: DB_ERATV
+      DB_USER: guest
+      DB_PASS: guest
     volumes:
-      - ./models:/app/models  # Persistance modèles ML
+      - ./models:/app/models
 
   ###########################################################
   # ML API : expose le modèle pour prédictions
@@ -174,7 +185,7 @@ services:
     environment:
       MODEL_PATH: /app/models/model.pkl
     ports:
-      - "8500:8500"  # Expose API externe
+      - "8500:8500"
     volumes:
       - ./models:/app/models
 
@@ -188,20 +199,19 @@ services:
       - postgres
     environment:
       DB_HOST: postgres
-      DB_NAME: scraping
-      DB_USER: scrape
-      DB_PASS: scrape
+      DB_NAME: DB_ERATV
+      DB_USER: guest
+      DB_PASS: guest
     ports:
-      - "8000:8000"  # Expose API externe
+      - "8000:8000"
 
 ###########################################################
 # Notes volumes :
-# - ./data/xml_listes : XML téléchargés par scraper_liste_html
+# - ./data/csv_listes : CSV générés par scraper_liste_html
 # - ./data/xml_types_vehicules : XML détaillés
-# - ./postgres_data : fichiers PostgreSQL persistants
+# - ./postgres_data : persistance PostgreSQL
 # - ./models : modèles ML sauvegardés
-# Les bind mounts favorisent la portabilité et l’accès direct
-# aux fichiers depuis la machine hôte.
+# Bind mounts permettent portabilité et accès direct
 ###########################################################
 
-# Aucun volume nommé utilisé ici : tout est bind mount pour portabilité
+# Aucun volume nommé utilisé ici : tout est bind mount
