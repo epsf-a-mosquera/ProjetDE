@@ -15,5 +15,3 @@ docker-compose.override.yml
 .vscode/
 .idea/
 
-# Modelos entrenados
-models/

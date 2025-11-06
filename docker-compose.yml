@@ -15,7 +15,7 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - ./postgres_data:/var/lib/postgresql/data   # volume local pour persistance
 
   ###########################################################
   # RabbitMQ : broker pour communication asynchrone       #
@@ -31,31 +31,60 @@ services:
       - "15672:15672"     # Management UI
 
   ###########################################################
-  # Scraper HTML : récupère la page principale et liens XML#
+  # Scraper HTML principal : récupère le lien du XML liste#
   ###########################################################
-  scraper:
-    build: ./scraper
-    container_name: projetde_scraper
+  scraper_liste_html:
+    build: ./scraper_liste_html
+    container_name: projetde_scraper_liste_html
     depends_on:
       - rabbitmq
     environment:
       RABBITMQ_HOST: rabbitmq
 
   ###########################################################
-  # Parser XML : télécharge les fichiers XML et parse      #
+  # Parser liste XML : télécharge la liste et détecte MAJ #
   ###########################################################
-  parser:
-    build: ./parser
-    container_name: projetde_parser
+  parser_liste_xml:
+    build: ./parser_liste_xml
+    container_name: projetde_parser_liste_xml
+    depends_on:
+      - rabbitmq
+      - postgres
+    environment:
+      RABBITMQ_HOST: rabbitmq
+      DB_HOST: postgres
+      DB_NAME: scraping
+      DB_USER: scrape
+      DB_PASS: scrape
+    volumes:
+      - ./data/xml:/app/data/xml   # stockage local des XML
+
+  ###########################################################
+  # Scraper HTML type véhicule : récupère le lien XML détaillé#
+  ###########################################################
+  scraper_type_vehicule_html:
+    build: ./scraper_type_vehicule_html
+    container_name: projetde_scraper_type_vehicule_html
+    depends_on:
+      - rabbitmq
+    environment:
+      RABBITMQ_HOST: rabbitmq
+
+  ###########################################################
+  # Parser XML type véhicule : télécharge et parse XML    #
+  ###########################################################
+  parser_type_vehicule_xml:
+    build: ./parser_type_vehicule_xml
+    container_name: projetde_parser_type_vehicule_xml
     depends_on:
       - rabbitmq
     environment:
       RABBITMQ_HOST: rabbitmq
     volumes:
-      - ./data/xml:/app/data/xml   # stockage persistant des XML
+      - ./data/xml:/app/data/xml   # stockage local des XML
 
   ###########################################################
-  # Ingest : insère les données structurées dans PostgreSQL#
+  # Ingest : insertion / mise à jour dans PostgreSQL      #
   ###########################################################
   ingest:
     build: ./ingest
@@ -70,23 +99,24 @@ services:
       DB_PASS: scrape
       RABBITMQ_HOST: rabbitmq
     volumes:
-      - ./data/xml:/app/data/xml   # si besoin de référence aux XML
+      - ./data/xml:/app/data/xml   # référence aux fichiers XML
 
   ###########################################################
-  # Scheduler : planifie scraping et entraînement ML       #
+  # Scheduler : planifie scraping et entraînement ML      #
   ###########################################################
   scheduler:
     build: ./scheduler
     container_name: projetde_scheduler
     depends_on:
-      - scraper
+      - scraper_liste_html
+      - scraper_type_vehicule_html
       - ml_trainer
       - rabbitmq
     environment:
       RABBITMQ_HOST: rabbitmq
 
   ###########################################################
-  # ML Trainer : entraîne le modèle avec les données DB   #
+  # ML Trainer : entraînement du modèle ML                #
   ###########################################################
   ml_trainer:
     build: ./ml_trainer
@@ -99,10 +129,10 @@ services:
       DB_USER: scrape
       DB_PASS: scrape
     volumes:
-      - ./models:/app/models      # sauvegarde des modèles ML
+      - ./models:/app/models      # stockage local des modèles ML
 
   ###########################################################
-  # ML API : expose une API pour faire des prédictions     #
+  # ML API : API pour prédictions avec le modèle ML       #
   ###########################################################
   ml_api:
     build: ./ml_api
@@ -115,7 +145,7 @@ services:
       - "8500:8500"
 
   ###########################################################
-  # API REST : expose les données PostgreSQL via endpoints#
+  # API REST : exposer les données PostgreSQL             #
   ###########################################################
   api:
     build: ./api
@@ -129,11 +159,3 @@ services:
       DB_PASS: scrape
     ports:
       - "8000:8000"
-
-###########################################################
-# Volumes persistants
-###########################################################
-volumes:
-  postgres_data:
-  xml_data:
-  models_data:
