@@ -11,6 +11,7 @@ Scraper la liste complète des véhicules depuis ERA (HTML), page par page.
 
 import os
 import time
+import socket
 from datetime import datetime
 import pandas as pd
 from selenium import webdriver
@@ -45,15 +46,32 @@ chrome_options.binary_location = "/usr/bin/chromium"  # chemin du binaire chromi
 driver = webdriver.Chrome(options=chrome_options)
 
 # --------------------------------------
-# Connexion RabbitMQ
+# Connexion RabbitMQ avec retry robuste
 # --------------------------------------
 
-credentials = pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASS)
-connection = pika.BlockingConnection(
-    pika.ConnectionParameters(host=RABBITMQ_HOST, credentials=credentials)
-)
-channel = connection.channel()
-channel.queue_declare(queue=QUEUE_NAME, durable=True)
+max_retries = 10
+retry_delay = 5  # secondes
+
+for attempt in range(1, max_retries + 1):
+    try:
+        credentials = pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASS)
+        connection = pika.BlockingConnection(
+            pika.ConnectionParameters(
+                host=RABBITMQ_HOST,
+                credentials=credentials,
+                heartbeat=600,  # plus tolérant aux délais
+                blocked_connection_timeout=300
+            )
+        )
+        channel = connection.channel()
+        channel.queue_declare(queue=QUEUE_NAME, durable=True)
+        print(f"[INFO] Connexion RabbitMQ réussie après {attempt} tentative(s)")
+        break
+    except (pika.exceptions.AMQPConnectionError, socket.gaierror, pika.exceptions.ChannelClosedByBroker) as e:
+        print(f"[WARN] RabbitMQ non disponible, retry {attempt}/{max_retries} dans {retry_delay}s... ({e})")
+        time.sleep(retry_delay)
+else:
+    raise Exception("Impossible de se connecter à RabbitMQ après plusieurs tentatives")
 
 # --------------------------------------
 # Fonctions
@@ -110,15 +128,24 @@ def send_csv_ready_message(csv_file):
     L'autre microservice pourra le parser et comparer avec la DB.
     """
     message = f"CSV ready: {csv_file}"
-    channel.basic_publish(
-        exchange='',
-        routing_key=QUEUE_NAME,
-        body=message,
-        properties=pika.BasicProperties(
-            delivery_mode=2,  # message persistant
-        )
-    )
-    print(f"[INFO] Message envoyé à RabbitMQ: {message}")
+    for attempt in range(5):
+        try:
+            channel.basic_publish(
+                exchange='',
+                routing_key=QUEUE_NAME,
+                body=message,
+                properties=pika.BasicProperties(
+                    delivery_mode=2,  # message persistant
+                )
+            )
+            print(f"[INFO] Message envoyé à RabbitMQ: {message}")
+            break
+        except pika.exceptions.AMQPConnectionError as e:
+            print(f"[WARN] Erreur en envoyant le message, retry {attempt + 1}/5")
+            time.sleep(2)
+    else:
+        raise Exception("Impossible d'envoyer le message à RabbitMQ")
+
 
 # --------------------------------------
 # Exécution principale avec pagination

@@ -29,14 +29,19 @@ services:
   # RabbitMQ : broker de messages avec interface de management
   ###########################################################
   rabbitmq:
-    image: rabbitmq:3-management  # Version avec interface web (15672)
+    image: rabbitmq:3-management
     container_name: projetde_rabbitmq
     environment:
       RABBITMQ_DEFAULT_USER: guest
       RABBITMQ_DEFAULT_PASS: guest
     ports:
-      - "5672:5672"     # Port pour les clients (queue)
-      - "15672:15672"   # Port pour la web UI de management
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
   ###########################################################
   # Scraper liste HTML : récupère la liste en CSV
@@ -46,7 +51,7 @@ services:
     build: ./scraper_liste_html  # Dockerfile local pour le service
     container_name: projetde_scraper_liste_html
     depends_on:
-      - rabbitmq  # Démarre après RabbitMQ pour pouvoir publier les messages
+      - rabbitmq  # juste dépendance normale
     environment:
       RABBITMQ_HOST: rabbitmq  # Nom du service RabbitMQ (réseau interne)
       QUEUE_NAME: csv_list.queue  # Queue utilisée pour publier la liste csv
