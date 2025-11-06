@@ -2,10 +2,11 @@
 # -*- coding: utf-8 -*-
 
 """
-worker.py
----------
-Parse le CSV généré par scraper_liste_html, compare avec la DB PostgreSQL,
-envoie les nouvelles URLs à vehicle_pages.queue et met à jour la DB.
+parser_liste_csv - worker RabbitMQ
+----------------------------------
+Consomme les messages de `csv_list.queue` envoyés par le scraper_liste_html,
+lit le CSV correspondant (volume partagé), compare avec la base PostgreSQL,
+envoie les nouvelles URLs dans `vehicle_pages.queue` et met à jour la DB.
 """
 
 import os
@@ -14,90 +15,91 @@ import socket
 import pandas as pd
 import psycopg2
 import pika
-from datetime import datetime
 
 # --------------------------------------
-# Configuration
+# Configurations
 # --------------------------------------
-DATA_DIR = os.getenv("DATA_DIR", "/app/data/csv_listes")
-CSV_FILES = sorted([f for f in os.listdir(DATA_DIR) if f.endswith(".csv")])
-if not CSV_FILES:
-    raise FileNotFoundError(f"Aucun CSV trouvé dans {DATA_DIR}")
-LATEST_CSV = os.path.join(DATA_DIR, CSV_FILES[-1])
-
-# RabbitMQ
 RABBITMQ_HOST = os.getenv("RABBITMQ_HOST", "rabbitmq")
 RABBITMQ_USER = os.getenv("RABBITMQ_USER", "guest")
 RABBITMQ_PASS = os.getenv("RABBITMQ_PASS", "guest")
+QUEUE_IN = os.getenv("QUEUE_IN", "csv_list.queue")
 QUEUE_OUT = os.getenv("QUEUE_OUT", "vehicle_pages.queue")
 
-# PostgreSQL
 DB_HOST = os.getenv("DB_HOST", "postgres")
-DB_NAME = os.getenv("DB_NAME", "scraping")
-DB_USER = os.getenv("DB_USER", "scrape")
-DB_PASS = os.getenv("DB_PASS", "scrape")
+DB_NAME = os.getenv("DB_NAME", "DB_type_vehicule")
+DB_USER = os.getenv("DB_USER", "guest")
+DB_PASS = os.getenv("DB_PASS", "guest")
 
-# Retry parameters RabbitMQ
+DATA_DIR = os.getenv("DATA_DIR", "/app/data/csv_listes")
+
 MAX_RETRIES = 10
 RETRY_DELAY = 5
 
-# --------------------------------------
-# Connexion RabbitMQ
-# --------------------------------------
-for attempt in range(1, MAX_RETRIES + 1):
-    try:
-        credentials = pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASS)
-        connection = pika.BlockingConnection(
-            pika.ConnectionParameters(
-                host=RABBITMQ_HOST,
-                credentials=credentials,
-                heartbeat=600,
-                blocked_connection_timeout=300
-            )
-        )
-        channel = connection.channel()
-        channel.queue_declare(queue=QUEUE_OUT, durable=True)
-        print(f"[INFO] Connecté à RabbitMQ après {attempt} tentative(s)")
-        break
-    except (pika.exceptions.AMQPConnectionError, socket.gaierror) as e:
-        print(f"[WARN] RabbitMQ non disponible, retry {attempt}/{MAX_RETRIES} ({e})")
-        time.sleep(RETRY_DELAY)
-else:
-    raise Exception("Impossible de se connecter à RabbitMQ après plusieurs tentatives")
 
 # --------------------------------------
 # Connexion PostgreSQL
 # --------------------------------------
-conn = psycopg2.connect(
-    host=DB_HOST,
-    dbname=DB_NAME,
-    user=DB_USER,
-    password=DB_PASS
-)
-cursor = conn.cursor()
+def connect_db():
+    conn = None
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            conn = psycopg2.connect(
+                host=DB_HOST,
+                dbname=DB_NAME,
+                user=DB_USER,
+                password=DB_PASS
+            )
+            print(f"[INFO] Connexion PostgreSQL réussie (tentative {attempt})")
+            return conn
+        except Exception as e:
+            print(f"[WARN] PostgreSQL non prêt, retry {attempt}/{MAX_RETRIES}: {e}")
+            time.sleep(RETRY_DELAY)
+    raise Exception("Impossible de se connecter à PostgreSQL")
+
 
 # --------------------------------------
-# Fonctions principales
+# Connexion RabbitMQ
 # --------------------------------------
+def connect_rabbitmq():
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            credentials = pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASS)
+            connection = pika.BlockingConnection(
+                pika.ConnectionParameters(
+                    host=RABBITMQ_HOST,
+                    credentials=credentials,
+                    heartbeat=600,
+                    blocked_connection_timeout=300
+                )
+            )
+            channel = connection.channel()
+            channel.queue_declare(queue=QUEUE_IN, durable=True)
+            channel.queue_declare(queue=QUEUE_OUT, durable=True)
+            print(f"[INFO] Connexion RabbitMQ réussie (tentative {attempt})")
+            return connection, channel
+        except (pika.exceptions.AMQPConnectionError, socket.gaierror) as e:
+            print(f"[WARN] RabbitMQ non disponible, retry {attempt}/{MAX_RETRIES}: {e}")
+            time.sleep(RETRY_DELAY)
+    raise Exception("Impossible de se connecter à RabbitMQ")
 
-def load_csv(file_path):
-    """Charge le CSV et renvoie un DataFrame"""
-    df = pd.read_csv(file_path)
-    return df
 
-def fetch_db_types():
-    """Récupère les données existantes dans la DB"""
+# --------------------------------------
+# Logique principale de parsing
+# --------------------------------------
+def process_csv(csv_path, cursor, conn, channel):
+    print(f"[INFO] Traitement du fichier CSV : {csv_path}")
+    if not os.path.exists(csv_path):
+        print(f"[ERREUR] Fichier introuvable : {csv_path}")
+        return
+
+    csv_df = pd.read_csv(csv_path)
     cursor.execute("SELECT TypeID, EIN, TypeName, Status, LastUpdate, URL FROM vehicles")
-    rows = cursor.fetchall()
-    df = pd.DataFrame(rows, columns=["TypeID", "EIN", "TypeName", "Status", "LastUpdate", "URL"])
-    return df
-
-def compare_and_update(csv_df, db_df):
-    """Compare CSV vs DB et retourne nouveaux types et modifs"""
-    new_entries = []
-    updated_entries = []
+    db_rows = cursor.fetchall()
+    db_df = pd.DataFrame(db_rows, columns=["TypeID", "EIN", "TypeName", "Status", "LastUpdate", "URL"])
 
     db_dict = db_df.set_index("TypeID").to_dict("index")
+    new_entries = []
+    updated_entries = []
 
     for _, row in csv_df.iterrows():
         type_id = row["TypeID"]
@@ -105,27 +107,21 @@ def compare_and_update(csv_df, db_df):
             new_entries.append(row)
         else:
             db_row = db_dict[type_id]
-            # Comparer les champs (sauf TypeID)
-            if any(row[field] != db_row[field] for field in ["EIN","TypeName","Status","LastUpdate","URL"]):
+            if any(row[col] != db_row[col] for col in ["EIN", "TypeName", "Status", "LastUpdate", "URL"]):
                 updated_entries.append(row)
 
-    return new_entries, updated_entries
-
-def send_new_urls(new_entries):
-    """Envoie les URLs des nouveaux types à RabbitMQ"""
+    # Envoi des nouvelles URLs
     for row in new_entries:
-        url = row["URL"]
-        message = f"{row['TypeID']}|{url}"
+        message = f"{row['TypeID']}|{row['URL']}"
         channel.basic_publish(
             exchange='',
             routing_key=QUEUE_OUT,
             body=message,
             properties=pika.BasicProperties(delivery_mode=2)
         )
-        print(f"[INFO] URL envoyée à queue: {message}")
+        print(f"[INFO] Nouvelle URL envoyée : {message}")
 
-def update_db(new_entries, updated_entries):
-    """Insère et met à jour les données dans PostgreSQL"""
+    # Mise à jour DB
     for row in new_entries:
         cursor.execute(
             """
@@ -144,26 +140,38 @@ def update_db(new_entries, updated_entries):
             (row["EIN"], row["TypeName"], row["Status"], row["LastUpdate"], row["URL"], row["TypeID"])
         )
     conn.commit()
-    print(f"[INFO] DB mise à jour: {len(new_entries)} nouveaux, {len(updated_entries)} modifiés")
+    print(f"[INFO] DB mise à jour : {len(new_entries)} nouveaux, {len(updated_entries)} modifiés")
+
 
 # --------------------------------------
-# Main
+# Callback RabbitMQ
+# --------------------------------------
+def on_message(ch, method, properties, body):
+    message = body.decode()
+    print(f"[INFO] Message reçu : {message}")
+    if message.startswith("CSV ready:"):
+        csv_path = message.replace("CSV ready:", "").strip()
+        conn = connect_db()
+        cursor = conn.cursor()
+        process_csv(csv_path, cursor, conn, ch)
+        cursor.close()
+        conn.close()
+    else:
+        print(f"[WARN] Message inattendu : {message}")
+
+    ch.basic_ack(delivery_tag=method.delivery_tag)
+
+
+# --------------------------------------
+# Boucle principale
 # --------------------------------------
 def main():
-    print(f"[INFO] Lecture du CSV: {LATEST_CSV}")
-    csv_df = load_csv(LATEST_CSV)
-    db_df = fetch_db_types()
-    new_entries, updated_entries = compare_and_update(csv_df, db_df)
+    connection, channel = connect_rabbitmq()
+    channel.basic_qos(prefetch_count=1)
+    channel.basic_consume(queue=QUEUE_IN, on_message_callback=on_message)
+    print(f"[INFO] En attente de messages sur {QUEUE_IN} ...")
+    channel.start_consuming()
 
-    if new_entries:
-        send_new_urls(new_entries)
-    if new_entries or updated_entries:
-        update_db(new_entries, updated_entries)
-
-    connection.close()
-    cursor.close()
-    conn.close()
-    print("[INFO] Worker terminé.")
 
 if __name__ == "__main__":
     main()

@@ -17,9 +17,9 @@ services:
     image: postgres:15  # Image officielle PostgreSQL version 15
     container_name: projetde_postgres  # Nom du conteneur pour facilité la gestion
     environment:  # Variables d'environnement pour config DB
-      POSTGRES_DB: scraping  # Nom de la base créée par défaut
-      POSTGRES_USER: scrape  # Utilisateur principal
-      POSTGRES_PASSWORD: scrape  # Mot de passe associé
+      POSTGRES_DB: DB_type_vehicule  # Nom de la base créée par défaut
+      POSTGRES_USER: guest  # Utilisateur principal
+      POSTGRES_PASSWORD: guest  # Mot de passe associé
     ports:
       - "5432:5432"  # Expose le port local 5432 vers le conteneur
     volumes:
