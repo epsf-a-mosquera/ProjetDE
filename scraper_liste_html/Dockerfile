@@ -1,43 +1,44 @@
-FROM python:3.11-slim
+# --------------------------------------
+# Image de base
+# --------------------------------------
+# Utilise l'image officielle Python avec Playwright préinstallé
+# v1.44.0-focal correspond à une version stable sur Ubuntu 20.04
+FROM mcr.microsoft.com/playwright/python:v1.44.0-focal
 
-# Dépendances système pour Chromium/ChromeDriver
-RUN apt-get update && apt-get install -y \
-    wget \
-    curl \
-    unzip \
-    gnupg \
-    chromium \
-    chromium-driver \
-    fonts-liberation \
-    libnss3 \
-    libatk1.0-0 \
-    libatk-bridge2.0-0 \
-    libcups2 \
-    libdrm2 \
-    libxkbcommon0 \
-    libx11-xcb1 \
-    libxcomposite1 \
-    libxdamage1 \
-    libxrandr2 \
-    libgbm1 \
-    libasound2 \
-    xdg-utils \
-    --no-install-recommends && rm -rf /var/lib/apt/lists/*
-
-# Répertoire de travail
+# --------------------------------------
+# Définition du répertoire de travail
+# --------------------------------------
+# Tous les chemins et commandes suivantes se feront à partir de /app
 WORKDIR /app
 
-# Copier les requirements
+# --------------------------------------
+# Installation des dépendances Python
+# --------------------------------------
+# Copier le fichier requirements.txt dans le conteneur
 COPY requirements.txt .
 
-# Installer les dépendances Python
+# Installer les dépendances listées dans requirements.txt
+# --no-cache-dir empêche la mise en cache pour réduire la taille de l'image
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copier le code
+# --------------------------------------
+# Copier le script worker dans le conteneur
+# --------------------------------------
+# worker.py est le script principal du microservice scraper
 COPY worker.py .
 
-# Variable d'environnement pour Chromium
-ENV CHROME_BIN=/usr/bin/chromium
-ENV CHROME_DRIVER=/usr/bin/chromedriver
+# --------------------------------------
+# Création des répertoires pour les fichiers
+# --------------------------------------
+# Définition des variables d'environnement pour l'accès dans le script Python
+ENV DATA_DIR=/app/data/csv_listes
+ENV DOWNLOAD_DIR=/app/data/downloads
 
+# Création physique des dossiers pour éviter les erreurs lors du téléchargement ou CSV
+RUN mkdir -p $DATA_DIR $DOWNLOAD_DIR
+
+# --------------------------------------
+# Définition du point d'entrée du conteneur
+# --------------------------------------
+# Lorsque le conteneur démarre, il exécute le script worker.py
 CMD ["python", "worker.py"]

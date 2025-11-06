@@ -5,7 +5,7 @@
 parser_liste_csv/worker.py
 --------------------------
 Lit le CSV généré par scraper_liste_html, compare avec la table PostgreSQL 'liste_ERATV',
-détecte les nouveaux ou modifiés, met à jour la base, et envoie leurs URLs
+détecte les nouveaux ou modifiés, met à jour la base via UPSERT, et envoie les URLs
 dans la queue 'vehicle_pages.queue' pour le scraping détaillé.
 """
 
@@ -28,7 +28,7 @@ DB_NAME = os.getenv("DB_NAME", "DB_ERATV")
 DB_USER = os.getenv("DB_USER", "guest")
 DB_PASS = os.getenv("DB_PASS", "guest")
 
-CSV_DIR = "/app/data/csv/listes"
+CSV_DIR = "/app/data/csv_listes"
 
 # ------------------------------------------------------------
 # Connexion PostgreSQL
@@ -63,80 +63,52 @@ def parse_csv_path(message: str) -> str:
     return match.group(1).strip() if match else None
 
 # ------------------------------------------------------------
-# Comparaison CSV vs DB
+# Comparaison CSV vs DB et mise à jour avec UPSERT
 # ------------------------------------------------------------
 def compare_and_update(csv_path, db_conn, rabbit_channel):
     print(f"[INFO] Lecture du CSV : {csv_path}")
+    # Lecture CSV et remplissage des NaN
     df_csv = pd.read_csv(csv_path, dtype=str).fillna("")
-
-    with db_conn.cursor() as cur:
-        cur.execute("""
-            SELECT Type_ID, Authorisation_document_reference_EIN, Type_Name,
-                   Authorisation_Status, Last_Update, URL_TV
-            FROM liste_ERATV
-        """)
-        rows = cur.fetchall()
-
-    db_df = pd.DataFrame(rows, columns=[
-        "Type_ID", "Authorisation_document_reference_EIN",
-        "Type_Name", "Authorisation_Status", "Last_Update", "URL_TV"
-    ])
-    db_df = db_df.astype(str).fillna("")
+    # Normalisation des noms de colonnes pour éviter les erreurs
+    df_csv.columns = [c.strip() for c in df_csv.columns]
 
     urls_to_publish = []
 
     with db_conn.cursor() as cur:
         for _, row in df_csv.iterrows():
             csv_rec = row.to_dict()
-            type_id = csv_rec["TypeID"]
+            type_id = csv_rec.get("TypeID", "").strip()
+            ein = csv_rec.get("EIN", "").strip()
+            name = csv_rec.get("TypeName", "").strip()
+            status = csv_rec.get("Status", "").strip()
+            last_update = csv_rec.get("LastUpdate", "").strip()
+            url_tv = csv_rec.get("URL", "").strip()
 
-            # Adapter les noms de colonnes CSV aux colonnes SQL
-            ein = csv_rec.get("EIN", "")
-            name = csv_rec.get("TypeName", "")
-            status = csv_rec.get("Status", "")
-            last_update = csv_rec.get("LastUpdate", "")
-            url_tv = csv_rec.get("URL", "")
+            if not type_id:
+                continue  # ignorer les lignes sans TypeID
 
-            existing = db_df[db_df["Type_ID"] == type_id]
+            # UPSERT : insert ou update si Type_ID existe déjà
+            cur.execute("""
+                INSERT INTO liste_ERATV
+                (Type_ID, Authorisation_document_reference_EIN, Type_Name,
+                 Authorisation_Status, Last_Update, URL_TV)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (Type_ID) DO UPDATE SET
+                    Authorisation_document_reference_EIN = EXCLUDED.Authorisation_document_reference_EIN,
+                    Type_Name = EXCLUDED.Type_Name,
+                    Authorisation_Status = EXCLUDED.Authorisation_Status,
+                    Last_Update = EXCLUDED.Last_Update,
+                    URL_TV = EXCLUDED.URL_TV,
+                    updated_at = NOW()
+            """, (type_id, ein, name, status, last_update, url_tv))
 
-            if existing.empty:
-                # Nouveau véhicule
-                cur.execute("""
-                    INSERT INTO liste_ERATV
-                    (Type_ID, Authorisation_document_reference_EIN, Type_Name,
-                     Authorisation_Status, Last_Update, URL_TV)
-                    VALUES (%s, %s, %s, %s, %s, %s)
-                """, (type_id, ein, name, status, last_update, url_tv))
-                urls_to_publish.append(url_tv)
-                print(f"[NEW] {type_id} ajouté.")
-
-            else:
-                db_rec = existing.iloc[0].to_dict()
-                changed = any([
-                    ein != db_rec["Authorisation_document_reference_EIN"],
-                    name != db_rec["Type_Name"],
-                    status != db_rec["Authorisation_Status"],
-                    last_update != db_rec["Last_Update"],
-                    url_tv != db_rec["URL_TV"],
-                ])
-
-                if changed:
-                    cur.execute("""
-                        UPDATE liste_ERATV
-                        SET Authorisation_document_reference_EIN=%s,
-                            Type_Name=%s,
-                            Authorisation_Status=%s,
-                            Last_Update=%s,
-                            URL_TV=%s,
-                            updated_at=NOW()
-                        WHERE Type_ID=%s
-                    """, (ein, name, status, last_update, url_tv, type_id))
-                    urls_to_publish.append(url_tv)
-                    print(f"[UPDATED] {type_id} mis à jour.")
+            urls_to_publish.append(url_tv)
+            print(f"[INFO] Traité : {type_id}")
 
     db_conn.commit()
-    print(f"[INFO] {len(urls_to_publish)} nouveaux ou modifiés détectés.")
+    print(f"[INFO] {len(urls_to_publish)} URLs à publier")
 
+    # Publication des URLs dans RabbitMQ
     for url in urls_to_publish:
         rabbit_channel.basic_publish(
             exchange="",

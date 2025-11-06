@@ -70,7 +70,7 @@ services:
       RABBITMQ_HOST: rabbitmq
       QUEUE_NAME: csv_list.queue
     volumes:
-      - ./data/csv_listes:/app/data
+      - ./data/csv_listes:/app/data/csv_listes
 
   ###########################################################
   # Parser liste CSV : lit CSV, compare avec DB, envoie
@@ -91,7 +91,7 @@ services:
       DB_USER: guest
       DB_PASS: guest
     volumes:
-      - ./data/csv_listes:/app/data/csv/listes
+      - ./data/csv_listes:/app/data/csv_listes
 
   ###########################################################
   # Scraper HTML type véhicule : récupère page véhicule,

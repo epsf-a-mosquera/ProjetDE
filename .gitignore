@@ -15,3 +15,6 @@ docker-compose.override.yml
 .vscode/
 .idea/
 
+#dossiers
+postgres_data/
+
