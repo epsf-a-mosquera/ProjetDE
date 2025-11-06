@@ -4,21 +4,23 @@
 """
 parser_liste_csv/worker.py
 --------------------------
-Lit le CSV généré par scraper_liste_html, compare avec la table PostgreSQL 'liste_ERATV',
-détecte les nouveaux ou modifiés, met à jour la base via UPSERT, et envoie les URLs
-dans la queue 'vehicle_pages.queue' pour le scraping détaillé.
+Consomme les CSV produits par scraper_liste_html,
+synchronise la table liste_eratv dans PostgreSQL,
+et publie les URLs nouvelles ou modifiées dans vehicle_pages.queue.
 """
 
 import os
 import time
-import re
 import pandas as pd
 import psycopg2
+from psycopg2.extras import RealDictCursor
 import pika
+import socket
+import functools
 
-# ------------------------------------------------------------
-# Configuration
-# ------------------------------------------------------------
+# ===============================================================
+#  Configuration via variables d'environnement
+# ===============================================================
 RABBITMQ_HOST = os.getenv("RABBITMQ_HOST", "rabbitmq")
 QUEUE_IN = os.getenv("QUEUE_IN", "csv_list.queue")
 QUEUE_OUT = os.getenv("QUEUE_OUT", "vehicle_pages.queue")
@@ -28,133 +30,157 @@ DB_NAME = os.getenv("DB_NAME", "DB_ERATV")
 DB_USER = os.getenv("DB_USER", "guest")
 DB_PASS = os.getenv("DB_PASS", "guest")
 
-CSV_DIR = "/app/data/csv_listes"
+DATA_DIR = os.getenv("DATA_DIR", "/app/data/csv_listes")
+os.makedirs(DATA_DIR, exist_ok=True)
 
-# ------------------------------------------------------------
-# Connexion PostgreSQL
-# ------------------------------------------------------------
-def get_db_connection():
-    return psycopg2.connect(
-        host=DB_HOST, dbname=DB_NAME, user=DB_USER, password=DB_PASS
-    )
+# ===============================================================
+#  Utilitaires
+# ===============================================================
+def normalize(val):
+    """Normalise une valeur pour la comparaison (str, strip, vide->'')."""
+    if pd.isna(val):
+        return ""
+    return str(val).strip()
 
-# ------------------------------------------------------------
-# Connexion RabbitMQ
-# ------------------------------------------------------------
-def get_rabbit_channel():
-    for attempt in range(10):
+# ===============================================================
+#  Connexion RabbitMQ avec retry
+# ===============================================================
+def connect_rabbitmq():
+    max_retries = 10
+    retry_delay = 5
+    for attempt in range(1, max_retries + 1):
         try:
+            creds = pika.PlainCredentials("guest", "guest")
             connection = pika.BlockingConnection(
-                pika.ConnectionParameters(host=RABBITMQ_HOST, heartbeat=600)
+                pika.ConnectionParameters(host=RABBITMQ_HOST, credentials=creds, heartbeat=600)
             )
             channel = connection.channel()
+            channel.queue_declare(queue=QUEUE_IN, durable=True)
             channel.queue_declare(queue=QUEUE_OUT, durable=True)
+            channel.basic_qos(prefetch_count=1)
+            print(f"[INFO] Connexion RabbitMQ réussie (tentative {attempt})")
             return connection, channel
-        except pika.exceptions.AMQPConnectionError:
-            print(f"[WARN] RabbitMQ non dispo, retry {attempt+1}/10")
-            time.sleep(5)
+        except (pika.exceptions.AMQPConnectionError, socket.gaierror) as e:
+            print(f"[WARN] RabbitMQ non disponible (retry {attempt}/{max_retries}): {e}")
+            time.sleep(retry_delay)
     raise Exception("Impossible de se connecter à RabbitMQ")
 
-# ------------------------------------------------------------
-# Extraction du chemin CSV depuis le message
-# ------------------------------------------------------------
-def parse_csv_path(message: str) -> str:
-    match = re.search(r"CSV ready:\s*(.*)", message)
-    return match.group(1).strip() if match else None
+# ===============================================================
+#  Connexion PostgreSQL avec retry
+# ===============================================================
+def connect_postgres():
+    max_retries = 10
+    retry_delay = 5
+    for attempt in range(1, max_retries + 1):
+        try:
+            conn = psycopg2.connect(
+                host=DB_HOST, dbname=DB_NAME,
+                user=DB_USER, password=DB_PASS
+            )
+            print(f"[INFO] Connexion PostgreSQL réussie (tentative {attempt})")
+            return conn
+        except psycopg2.OperationalError as e:
+            print(f"[WARN] PostgreSQL non disponible (retry {attempt}/{max_retries}): {e}")
+            time.sleep(retry_delay)
+    raise Exception("Impossible de se connecter à PostgreSQL")
 
-# ------------------------------------------------------------
-# Comparaison CSV vs DB et mise à jour avec UPSERT
-# ------------------------------------------------------------
-def compare_and_update(csv_path, db_conn, rabbit_channel):
-    print(f"[INFO] Lecture du CSV : {csv_path}")
-    # Lecture CSV et remplissage des NaN
-    df_csv = pd.read_csv(csv_path, dtype=str).fillna("")
-    # Normalisation des noms de colonnes pour éviter les erreurs
-    df_csv.columns = [c.strip() for c in df_csv.columns]
+# ===============================================================
+#  Synchronisation du CSV avec la base
+# ===============================================================
+def process_csv(csv_file, db_conn, channel_out):
+    file_path = os.path.join(DATA_DIR, os.path.basename(csv_file))
+    print(f"[INFO] Traitement du fichier CSV : {file_path}")
 
-    urls_to_publish = []
+    df = pd.read_csv(file_path)
+    cursor = db_conn.cursor(cursor_factory=RealDictCursor)
 
-    with db_conn.cursor() as cur:
-        for _, row in df_csv.iterrows():
-            csv_rec = row.to_dict()
-            type_id = csv_rec.get("TypeID", "").strip()
-            ein = csv_rec.get("EIN", "").strip()
-            name = csv_rec.get("TypeName", "").strip()
-            status = csv_rec.get("Status", "").strip()
-            last_update = csv_rec.get("LastUpdate", "").strip()
-            url_tv = csv_rec.get("URL", "").strip()
+    updated_count = 0
+    inserted_count = 0
 
-            if not type_id:
-                continue  # ignorer les lignes sans TypeID
+    for _, row in df.iterrows():
+        type_id = normalize(row["Type_ID"])
+        ein = normalize(row["Authorisation_document_reference (EIN)"])
+        type_name = normalize(row["Type_Name"])
+        status = normalize(row["Authorisation_Status"])
+        last_update = normalize(row["Last_Update"])
+        url_tv = normalize(row["ERA_URL"])
 
-            # UPSERT : insert ou update si Type_ID existe déjà
-            cur.execute("""
-                INSERT INTO liste_ERATV
-                (Type_ID, Authorisation_document_reference_EIN, Type_Name,
-                 Authorisation_Status, Last_Update, URL_TV)
-                VALUES (%s, %s, %s, %s, %s, %s)
-                ON CONFLICT (Type_ID) DO UPDATE SET
-                    Authorisation_document_reference_EIN = EXCLUDED.Authorisation_document_reference_EIN,
-                    Type_Name = EXCLUDED.Type_Name,
-                    Authorisation_Status = EXCLUDED.Authorisation_Status,
-                    Last_Update = EXCLUDED.Last_Update,
-                    URL_TV = EXCLUDED.URL_TV,
-                    updated_at = NOW()
-            """, (type_id, ein, name, status, last_update, url_tv))
+        cursor.execute("SELECT * FROM liste_eratv WHERE type_id = %s", (type_id,))
+        existing = cursor.fetchone()
 
-            urls_to_publish.append(url_tv)
-            print(f"[INFO] Traité : {type_id}")
+        if existing:
+            changed = (
+                normalize(existing["authorisation_document_reference_ein"]) != ein or
+                normalize(existing["type_name"]) != type_name or
+                normalize(existing["authorisation_status"]) != status or
+                normalize(existing["last_update"]) != last_update or
+                normalize(existing["url_tv"]) != url_tv
+            )
+            if changed:
+                cursor.execute("""
+                    UPDATE liste_eratv
+                    SET authorisation_document_reference_ein=%s,
+                        type_name=%s,
+                        authorisation_status=%s,
+                        last_update=%s,
+                        url_tv=%s
+                    WHERE type_id=%s
+                """, (ein, type_name, status, last_update, url_tv, type_id))
+                db_conn.commit()
+                updated_count += 1
+                channel_out.basic_publish(
+                    exchange='',
+                    routing_key=QUEUE_OUT,
+                    body=url_tv,
+                    properties=pika.BasicProperties(delivery_mode=2)
+                )
+        else:
+            cursor.execute("""
+                INSERT INTO liste_eratv(type_id, authorisation_document_reference_ein,
+                type_name, authorisation_status, last_update, url_tv)
+                VALUES (%s,%s,%s,%s,%s,%s)
+            """, (type_id, ein, type_name, status, last_update, url_tv))
+            db_conn.commit()
+            inserted_count += 1
+            channel_out.basic_publish(
+                exchange='',
+                routing_key=QUEUE_OUT,
+                body=url_tv,
+                properties=pika.BasicProperties(delivery_mode=2)
+            )
 
-    db_conn.commit()
-    print(f"[INFO] {len(urls_to_publish)} URLs à publier")
+    cursor.close()
+    print(f"[INFO] Synchronisation terminée : {inserted_count} insertions, {updated_count} mises à jour.")
 
-    # Publication des URLs dans RabbitMQ
-    for url in urls_to_publish:
-        rabbit_channel.basic_publish(
-            exchange="",
-            routing_key=QUEUE_OUT,
-            body=url,
-            properties=pika.BasicProperties(delivery_mode=2)
-        )
-        print(f"[PUBLISHED] URL envoyée: {url}")
-
-# ------------------------------------------------------------
-# Callback RabbitMQ
-# ------------------------------------------------------------
-def on_message(ch, method, properties, body):
-    msg = body.decode("utf-8").strip()
-    print(f"[INFO] Message reçu : {msg}")
-
-    csv_path = parse_csv_path(msg)
-    if not csv_path or not os.path.exists(csv_path):
-        print(f"[WARN] Fichier CSV introuvable : {csv_path}")
-        ch.basic_ack(delivery_tag=method.delivery_tag)
-        return
-
-    conn = get_db_connection()
-    _, out_channel = get_rabbit_channel()
+# ===============================================================
+#  Callback RabbitMQ
+# ===============================================================
+def callback(ch, method, properties, body, channel_out):
+    csv_file = body.decode()
+    print(f"[INFO] Nouveau message reçu : {csv_file}")
 
     try:
-        compare_and_update(csv_path, conn, out_channel)
-    finally:
-        conn.close()
-        out_channel.close()
+        db_conn = connect_postgres()
+        process_csv(csv_file, db_conn, channel_out)
+        db_conn.close()
+        ch.basic_ack(delivery_tag=method.delivery_tag)
+    except Exception as e:
+        print(f"[ERROR] Erreur lors du traitement du CSV : {e}")
+        ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
 
-    ch.basic_ack(delivery_tag=method.delivery_tag)
-    print("[INFO] Traitement terminé pour le message.")
-
-# ------------------------------------------------------------
-# Programme principal
-# ------------------------------------------------------------
-def main():
-    print("[INFO] Démarrage du worker parser_liste_csv")
-    connection = pika.BlockingConnection(pika.ConnectionParameters(host=RABBITMQ_HOST))
-    channel = connection.channel()
-    channel.queue_declare(queue=QUEUE_IN, durable=True)
-    channel.basic_qos(prefetch_count=1)
-    channel.basic_consume(queue=QUEUE_IN, on_message_callback=on_message)
-    print(f"[INFO] En attente de messages dans {QUEUE_IN} ...")
-    channel.start_consuming()
-
+# ===============================================================
+#  Main
+# ===============================================================
 if __name__ == "__main__":
-    main()
+    connection, channel_in = connect_rabbitmq()
+    channel_out = connection.channel()
+    channel_out.queue_declare(queue=QUEUE_OUT, durable=True)
+
+    channel_in.basic_consume(
+        queue=QUEUE_IN,
+        on_message_callback=functools.partial(callback, channel_out=channel_out),
+        auto_ack=False
+    )
+
+    print("[INFO] En attente de nouveaux fichiers CSV...")
+    channel_in.start_consuming()

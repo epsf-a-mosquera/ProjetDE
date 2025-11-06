@@ -1,5 +1,5 @@
 ###########################################################
-# Docker Compose - ProjetDE (complet & portable)
+# Docker Compose - ProjetDE (complet & commenté)
 # Description :
 # Microservices pour scraping, parsing, ingestion DB,
 # entraînement ML et API. Tous les services sont inclus
@@ -28,7 +28,7 @@ services:
       - ./db/init:/docker-entrypoint-initdb.d      # scripts SQL init DB
 
   ###########################################################
-  # pgAdmin : interface web pour PostgreSQL
+  # pgAdmin : interface web PostgreSQL
   ###########################################################
   pgadmin:
     image: dpage/pgadmin4
@@ -50,7 +50,7 @@ services:
       RABBITMQ_DEFAULT_PASS: guest
     ports:
       - "5672:5672"    # communication microservices
-      - "15672:15672"  # interface web RabbitMQ
+      - "15672:15672"  # interface web RabbitMQ, accès web via http://localhost:15672
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "ping"]
       interval: 5s
@@ -70,7 +70,7 @@ services:
       RABBITMQ_HOST: rabbitmq
       QUEUE_NAME: csv_list.queue
     volumes:
-      - ./data/csv_listes:/app/data/csv_listes
+      - ./data/csv_listes:/app/data/csv_listes  # CSV générés par ce service
 
   ###########################################################
   # Parser liste CSV : lit CSV, compare avec DB, envoie
@@ -90,8 +90,9 @@ services:
       DB_NAME: DB_ERATV
       DB_USER: guest
       DB_PASS: guest
+      DATA_DIR: /app/data/csv_listes  # dossier où les CSV sont stockés
     volumes:
-      - ./data/csv_listes:/app/data/csv_listes
+      - ./data/csv_listes:/app/data/csv_listes  # partagé avec scraper_liste_html
 
   ###########################################################
   # Scraper HTML type véhicule : récupère page véhicule,
@@ -107,7 +108,7 @@ services:
       QUEUE_IN: vehicle_pages.queue
       QUEUE_OUT: xml_vehicle.queue
     volumes:
-      - ./data/xml_types_vehicules:/app/data/xml/types_vehicules
+      - ./data/xml_types_vehicules:/app/data/xml_types_vehicules  # stockage XML détaillés
 
   ###########################################################
   # Parser XML type véhicule : parse XML et publie données structurées
@@ -122,7 +123,7 @@ services:
       QUEUE_IN: xml_vehicle.queue
       QUEUE_OUT: parsed.queue
     volumes:
-      - ./data/xml_types_vehicules:/app/data/xml/types_vehicules
+      - ./data/xml_types_vehicules:/app/data/xml_types_vehicules
 
   ###########################################################
   # Ingest : insère / met à jour les données dans PostgreSQL
@@ -142,7 +143,7 @@ services:
       DB_PASS: guest
     volumes:
       - ./data/xml_listes:/app/data/xml/listes
-      - ./data/xml_types_vehicules:/app/data/xml/types_vehicules
+      - ./data/xml_types_vehicules:/app/data/xml_types_vehicules
 
   ###########################################################
   # Scheduler : planifie scraping & entraînements ML
@@ -172,7 +173,7 @@ services:
       DB_USER: guest
       DB_PASS: guest
     volumes:
-      - ./models:/app/models
+      - ./models:/app/models  # stockage modèle entraîné
 
   ###########################################################
   # ML API : expose le modèle pour prédictions

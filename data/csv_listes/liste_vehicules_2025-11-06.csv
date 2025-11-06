@@ -1,4 +1,6 @@
 Type_ID,Authorisation_document_reference (EIN),Type_Name,Authorisation_Status,Last_Update,ERA_URL
+13-382-0001-5-001-001,CZ8020250261,15EV3,Valid (Czech Republic),2025-11-06,https://eratv.era.europa.eu/Eratv/Home/View/13-382-0001-5-001-001
+13-233-0001-0-001-004,PL8020210156,31WEb w wersji 31WEbc v1,Valid (Poland),2025-11-06,https://eratv.era.europa.eu/Eratv/Home/View/13-233-0001-0-001-004
 11-070-0009-1-001-001,PL8020250295,TEM2/GSM-R,Valid (Poland),2025-11-06,https://eratv.era.europa.eu/Eratv/Home/View/11-070-0009-1-001-001
 71-209-0001-9-001-001,ES8020250299,R20_001.00.00,Valid (Spain),2025-11-05,https://eratv.era.europa.eu/Eratv/Home/View/71-209-0001-9-001-001
 11-068-0013-7-001-001,PL8020250293,Ls800/GSM-R,Valid (Poland),2025-11-05,https://eratv.era.europa.eu/Eratv/Home/View/11-068-0013-7-001-001
@@ -41,7 +43,6 @@ Type_ID,Authorisation_document_reference (EIN),Type_Name,Authorisation_Status,La
 72-002-0004-1-001-001,EU8020250287,Multitasker KRC 1200,Valid (European Union),2025-10-27,https://eratv.era.europa.eu/Eratv/Home/View/72-002-0004-1-001-001
 11-164-0001-9-001-001,EU8020250288,EG3100,Valid (European Union),2025-10-27,https://eratv.era.europa.eu/Eratv/Home/View/11-164-0001-9-001-001
 11-075-0001-7-008-005,EU8020250243,Eurodual E25/3/1.5 ES-FR-LU,Valid (European Union),2025-10-27,https://eratv.era.europa.eu/Eratv/Home/View/11-075-0001-7-008-005
-13-233-0001-0-001-004,PL8020210156,31WEb w wersji 31WEbc v1,Valid (Poland),2025-10-27,https://eratv.era.europa.eu/Eratv/Home/View/13-233-0001-0-001-004
 13-045-0006-7-001-001,BE8020240218,AM08 Desiro (3 kV – 25 kV) BL3 ETCS & TBL1+  NG,Valid (Belgium),2025-10-24,https://eratv.era.europa.eu/Eratv/Home/View/13-045-0006-7-001-001
 13-045-0004-2-001-001,BE8020240217,AM08 Desiro (3 kV) BL3 ETCS & TBL1+  NG,Valid (Belgium),2025-10-24,https://eratv.era.europa.eu/Eratv/Home/View/13-045-0004-2-001-001
 71-197-0001-6-001-001,LT8020240118,APV 320 SPAZIO 10 - 100 L,Valid (Lithuania),2025-10-24,https://eratv.era.europa.eu/Eratv/Home/View/71-197-0001-6-001-001
