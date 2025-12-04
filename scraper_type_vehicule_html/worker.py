@@ -1,19 +1,32 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+"""
+Worker scraper_type_vehicule_html :
+- Consomme vehicle_pages.queue (liste des URLs ERA pour chaque Type_ID)
+- Télécharge le XML associé
+- Publie le chemin du XML dans xml_vehicle.queue
+"""
+
 import os
 import time
+import random
+import pandas as pd
+import requests
+from bs4 import BeautifulSoup
 import pika
 import socket
-from playwright.sync_api import sync_playwright
+from datetime import datetime
 
 # -----------------------------
 # Configuration via ENV
 # -----------------------------
 RABBITMQ_HOST = os.getenv("RABBITMQ_HOST", "rabbitmq")
 QUEUE_IN = os.getenv("QUEUE_IN", "vehicle_pages.queue")
-QUEUE_OUT = os.getenv("QUEUE_OUT", "xml_vehicle.queue")  # queue de sortie vers parser_type_vehicule_xml
+QUEUE_OUT = os.getenv("QUEUE_OUT", "xml_vehicle.queue")
 DATA_DIR = os.getenv("DATA_DIR", "/app/data/xml_types_vehicules")
+
+BASE_URL = "https://eratv.era.europa.eu"
 
 os.makedirs(DATA_DIR, exist_ok=True)
 
@@ -40,64 +53,79 @@ def connect_rabbitmq():
     raise Exception("Impossible de se connecter à RabbitMQ")
 
 # -----------------------------
-# Fonction de scrap XML avec Playwright
+# Fonction safe_get avec retry
 # -----------------------------
-def scrape_xml(vehicle_id, channel_out):
-    base_url = "https://eratv.era.europa.eu"
-    vehicle_url = f"{base_url}/Eratv/Home/View/{vehicle_id}"
-    print(f"[INFO] Ouverture de la page HTML : {vehicle_url}")
+def safe_get(url, max_retries=3, timeout=30):
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = requests.get(url, timeout=timeout)
+            response.raise_for_status()
+            return response
+        except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:
+            print(f"⚠️ Tentative {attempt}/{max_retries} échouée ({e.__class__.__name__}). Nouvelle tentative dans 5s...")
+            time.sleep(5)
+    raise ConnectionError(f"❌ Impossible d'accéder à {url} après {max_retries} tentatives.")
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context()
-        page = context.new_page()
-        page.goto(vehicle_url, wait_until="domcontentloaded")  # attendre que DOM soit chargé
+# -----------------------------
+# Fonction pour scraper un XML depuis ERA
+# -----------------------------
+def scrape_xml(era_url, type_id):
+    print(f"\n🚀 Téléchargement du XML pour Type ID : {type_id}")
+    response = safe_get(era_url)
+    soup = BeautifulSoup(response.text, "html.parser")
 
-        # Attendre que le container principal soit visible
-        page.wait_for_selector("div#Container div#Content div[style*='float:right']", timeout=15000)
+    xml_link_tag = None
+    for a_tag in soup.find_all("a", href=True):
+        href = a_tag["href"]
+        if "exportTo=XML" in href:
+            xml_link_tag = a_tag
+            break
 
-        # Récupérer le lien XML
-        xml_link_tag = page.query_selector("div#Container div#Content div[style*='float:right'] a[href*='exportTo=XML']")
-        if not xml_link_tag:
-            browser.close()
-            raise Exception(f"Lien XML non trouvé pour vehicle_id={vehicle_id}")
+    if not xml_link_tag:
+        raise Exception(f"Aucun lien XML trouvé pour {type_id}")
 
-        xml_url = xml_link_tag.get_attribute("href")
-        if not xml_url.startswith("http"):
-            xml_url = base_url + xml_url
+    xml_url = xml_link_tag["href"]
+    if not xml_url.startswith("http"):
+        xml_url = BASE_URL + xml_url
+    print(f"✅ Lien XML trouvé : {xml_url}")
 
-        print(f"[INFO] Téléchargement du fichier XML : {xml_url}")
+    xml_response = safe_get(xml_url)
+    last_update = datetime.now().strftime("%Y-%m-%d")
+    filename = f"{type_id}_{last_update}.xml".replace("/", "-")
+    filepath = os.path.join(DATA_DIR, filename)
 
-        # Télécharger le XML
-        with page.expect_download() as download_info:
-            page.click(f"a[href='{xml_link_tag.get_attribute('href')}']")
-        download = download_info.value
-        file_path = os.path.join(DATA_DIR, f"{vehicle_id}.xml")
-        download.save_as(file_path)
-
-        print(f"[INFO] Fichier XML sauvegardé : {file_path}")
-
-        # Publier le fichier XML dans la queue xml_vehicle.queue
-        channel_out.basic_publish(
-            exchange='',
-            routing_key=QUEUE_OUT,
-            body=file_path,
-            properties=pika.BasicProperties(delivery_mode=2)
-        )
-        print(f"[INFO] Message publié dans {QUEUE_OUT} : {file_path}")
-
-        browser.close()
+    with open(filepath, "wb") as f:
+        f.write(xml_response.content)
+    print(f"✅ Fichier XML sauvegardé : {filepath}")
+    return filepath
 
 # -----------------------------
 # Callback RabbitMQ
 # -----------------------------
 def callback(ch, method, properties, body, channel_out):
-    vehicle_id = body.decode().strip()
     try:
-        scrape_xml(vehicle_id, channel_out)
+        message = body.decode().strip()
+        type_id, era_url = message.split("|", 1)  # on attend "Type_ID|ERA_URL"
+        xml_path = scrape_xml(era_url, type_id)
+
+        # Publier le fichier XML dans la queue de sortie
+        channel_out.basic_publish(
+            exchange='',
+            routing_key=QUEUE_OUT,
+            body=xml_path,
+            properties=pika.BasicProperties(delivery_mode=2)
+        )
+        print(f"[INFO] Message publié dans {QUEUE_OUT} : {xml_path}")
+
+        # Pause aléatoire pour éviter surcharge du site
+        wait_time = random.randint(3*60, 7*60)
+        print(f"⏱️ Pause de {wait_time//60} min {wait_time%60} sec avant le prochain téléchargement...")
+        time.sleep(wait_time)
+
         ch.basic_ack(delivery_tag=method.delivery_tag)
+
     except Exception as e:
-        print(f"[ERROR] Erreur scrap XML pour {vehicle_id} : {e}")
+        print(f"[ERROR] Erreur scrap XML : {e}")
         ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
 
 # -----------------------------

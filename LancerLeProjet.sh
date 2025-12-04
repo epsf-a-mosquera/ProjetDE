@@ -13,7 +13,7 @@ mv ./data/csv_listes/*.csv ./data/csv_listes/old/ 2>/dev/null || true
 docker compose up -d postgres rabbitmq pgadmin
 
 
-Ensuite, il y a des commandes pour vérifier que PostgreSQL et RabbitMQ sont prêts :
+###Ensuite, il y a des commandes pour vérifier que PostgreSQL et RabbitMQ sont prêts :
 
 # Vérifier que PostgreSQL est prêt
 docker exec projetde_postgres pg_isready -U guest
@@ -28,7 +28,7 @@ docker exec projetde_rabbitmq rabbitmq-diagnostics check_running
 docker exec projetde_rabbitmq rabbitmqctl start_app
 
 
-Purge des queues si elles existent :
+###Purge des queues si elles existent :
 
 docker exec projetde_rabbitmq rabbitmqctl list_queues -q | grep -q "^csv_list.queue"
 docker exec projetde_rabbitmq rabbitmqctl purge_queue csv_list.queue || true
@@ -36,9 +36,9 @@ docker exec projetde_rabbitmq rabbitmqctl purge_queue csv_list.queue || true
 docker exec projetde_rabbitmq rabbitmqctl list_queues -q | grep -q "^vehicle_pages.queue"
 docker exec projetde_rabbitmq rabbitmqctl purge_queue vehicle_pages.queue || true
 
-Étape 2 : Lancer les services custom
+##Étape 2 : Lancer les services custom
 
-Pour chaque service de la liste :
+##Pour chaque service de la liste :
 
 # Construire et lancer scraper_liste_html
 docker compose build scraper_liste_html
