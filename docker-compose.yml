@@ -6,8 +6,6 @@
 # avec des volumes locaux pour persistance.
 ###########################################################
 
-version: '3.9'
-
 services:
 
   ###########################################################
@@ -99,17 +97,20 @@ services:
   # extrait lien XML et publie dans xml_vehicle.queue
   ###########################################################
   scraper_type_vehicule_html:
-    build: ./scraper_type_vehicule_html
+    build:
+      context: ./scraper_type_vehicule_html
+      dockerfile: Dockerfile
     container_name: projetde_scraper_type_vehicule_html
+    environment:
+      - RABBITMQ_HOST=rabbitmq
+      - QUEUE_IN=vehicle_pages.queue
+      - QUEUE_OUT=xml_vehicle.queue   # anciennement xml_queue
+      - DATA_DIR=/app/data/xml_types_vehicules
+    volumes:
+      - ./data/xml_types_vehicules:/app/data/xml_types_vehicules
     depends_on:
       - rabbitmq
-    environment:
-      RABBITMQ_HOST: rabbitmq
-      QUEUE_IN: vehicle_pages.queue
-      QUEUE_OUT: xml_vehicle.queue
-    volumes:
-      - ./data/xml_types_vehicules:/app/data/xml_types_vehicules  # stockage XML détaillés
-
+    restart: unless-stopped
   ###########################################################
   # Parser XML type véhicule : parse XML et publie données structurées
   ###########################################################
