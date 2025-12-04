@@ -16,5 +16,5 @@ docker-compose.override.yml
 .idea/
 
 #dossiers
-postgres_data/
+#postgres_data/
 
